@@ -46,8 +46,8 @@ windll.atl.AtlAxWinInit()
 #    建議至少做到 (1) 檔案權限只留自己帳號可讀
 #                (2) 若這支程式進版本控制，記得 .gitignore 排除
 # ============================================================
-USER_ID_FUT = ""
-PASSWORD = ""
+USER_ID_FUT = "請填入身分證字號"
+PASSWORD = "請填入密碼"
 API_QUOTE_IP = "apiquote.yuantafutures.com.tw"   # 沿用「查詢.py」的位址
 API_ORDER_IP = "api.yuantafutures.com.tw"        # Ord元件用，來源：查詢.py/Forder.py
 
@@ -64,6 +64,15 @@ S1_BREAKOUT_PCT = 0.004    # 突破開盤價 ±0.4%
 S1_VOL_MULT = 2.0          # 前一根K棒量 > 2.0x 均量
 S1_ENTRY_TIME = dtime(9, 15, 0)
 S1_EXIT_TIME = dtime(13, 44, 0)    # 收盤強制平倉
+
+# ============================================================
+# 下單模式開關 —— 之後接上SendOrderF時，統一用這個開關控制
+# ⚠️ 這是唯一控制「會不會真的送單」的地方，寫成獨立常數方便一眼看到，
+#    不要散落在程式碼各處各自判斷。預設SAFE_MODE=True（只印出、不送單），
+#    要真的送單必須手動把這裡改成False，不能用參數/環境變數之類的方式
+#    意外被改動——這種等級的開關，改動應該要明顯、留痕跡。
+# ============================================================
+SAFE_MODE = True   # True=只印出「本來要下單」不送單 / False=真的呼叫SendOrderF
 
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -109,7 +118,7 @@ def get_current_fut_symbol(prefix: str = "TMF", today=None) -> str:
     return f"{prefix}{month_char}{year_char}"
 
 
-SYMBOL = get_current_fut_symbol("TMF")
+SYMBOL = get_current_fut_symbol("TXF")   # 2026/09/05 改為追蹤大台（原本是TMF微台）
 
 
 # ============================================================
@@ -274,6 +283,8 @@ class S1State:
         nth = self.trade_count + 1
         print(f"[S1訊號] {t} 【本來要下單】第{nth}筆 {side} 觸價進場 @ {price} "
               f"(開盤價{self.day_open}, 突破門檻{S1_BREAKOUT_PCT*100:.1f}%)")
+        self._place_order(direction, price, "entry")
+        self._log_trade(t, "entry", direction, price, None)
 
     def _exit(self, price: float, t: dtime, reason: str):
         pnl_dir = 1 if self.position == "long" else -1
@@ -281,9 +292,50 @@ class S1State:
         self.trade_count += 1
         print(f"[S1訊號] {t} 【本來要下單】第{self.trade_count}筆 出場平倉 @ {price} "
               f"({reason})，估計損益(未含手續費)={pnl:+.1f}點")
+        self._place_order(self.position, price, "exit")
+        self._log_trade(t, "exit", self.position, price, pnl, reason)
         self.position = None
         if self.trade_count >= self.MAX_TRADES_PER_DAY:
             self.done_today = True
+
+    def _place_order(self, direction: str, price: float, event_type: str):
+        """
+        唯一的送單進出口。之後接SendOrderF，只改這個方法內部，
+        _enter/_exit不用動。SAFE_MODE是全域唯一開關，這裡只負責遵守它，
+        不會自己另外判斷要不要送單。
+        """
+        if SAFE_MODE:
+            print(f"[模擬模式] 不送單（SAFE_MODE=True），"
+                  f"若為真實模式將送出：{event_type} {direction} @ {price}")
+            return
+        # TODO: 之後接上SendOrderF的地方，例如：
+        # act = "B" if direction == "long" else "S"
+        # self.ord.SendOrderF("01","0",bhno,acno,suba,"",act,SYMBOL,
+        #                      "", "1", "2", "M", "I", "", "")
+        print(f"[真實下單] ⚠️ SAFE_MODE=False，但SendOrderF尚未實作，"
+              f"目前仍不會真的送單：{event_type} {direction} @ {price}")
+
+    def _log_trade(self, t: dtime, event_type: str, direction: Optional[str],
+                    price: float, pnl: Optional[float], reason: str = ""):
+        """
+        寫進交易紀錄CSV，供之後跟元大對帳單核對「哪些成交是S1做的」，
+        以及事後檢討用（哪個策略、什麼時間、買賣點位）。
+        目前還沒有真的送單，所以沒有委託書號/實際成交價這些欄位，
+        之後接上SendOrderF/OnOrdMatF後要補上。
+        """
+        path = os.path.join(LOG_DIR, f"strategy_trades_{datetime.now():%Y%m%d}.csv")
+        write_header = not os.path.exists(path)
+        try:
+            with open(path, "a", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f)
+                if write_header:
+                    w.writerow(["time", "strategy", "event_type", "direction",
+                                "price", "pnl_points", "reason"])
+                w.writerow([t.strftime("%H:%M:%S"), "S1", event_type,
+                            direction or "", price,
+                            f"{pnl:+.1f}" if pnl is not None else "", reason])
+        except Exception as e:
+            print(f"[交易紀錄寫入失敗] {e}")
 
 
 class KBarBuilder:
