@@ -373,7 +373,7 @@ class KBarBuilder:
         return dtime(h, m, 0)
 
     def on_tick(self, match_time_raw: str, match_price_raw: str,
-                tol_match_qty_raw: str, match_qty_raw: str):
+                tol_match_qty_raw: str, match_qty_raw: str, open_pri_raw: str = ""):
         try:
             tol_qty = int(tol_match_qty_raw)
         except (TypeError, ValueError):
@@ -409,6 +409,18 @@ class KBarBuilder:
             price = float(match_price_raw)
         except (TypeError, ValueError):
             return
+
+        # 開盤價：直接用元大官方的OpenPri，不用再等第一根K棒收盤才推算
+        # （2026/09/10發現：用K棒推算，如果程式沒有剛好在08:45連上，
+        #  會抓到「程式開始收tick後第一筆」的價格，不是真正開盤價；
+        #  就算準時開，08:45那一刻連線不穩一樣會抓錯，且沒有警告）
+        try:
+            open_price = float(open_pri_raw)
+            if open_price > 0:
+                for strat in self.strategies:
+                    strat.set_day_open(open_price)
+        except (TypeError, ValueError):
+            pass
 
         # 四策略訊號判斷：跟切K棒共用同一筆tick，不等K棒收完（B案即時觸發）
         for strat in self.strategies:
@@ -701,7 +713,7 @@ class YuantaQuoteEvents:
                 except (TypeError, ValueError):
                     pass
 
-            self.parent.kbar_builder.on_tick(MatchTime, MatchPri, TolMatchQty, MatchQty)
+            self.parent.kbar_builder.on_tick(MatchTime, MatchPri, TolMatchQty, MatchQty, OpenPri)
         except Exception as e:
             print(f"[OnGetMktAll例外] {e}")
 

@@ -54,10 +54,14 @@ class StrategyBase:
             self.logger.info(f"[{self.name}] 從狀態檔恢復：trade_used={self.trade_used} "
                               f"position={self.position} entry_price={self.entry_price}")
 
-    def on_bar_close(self, bar: Bar1Min):
+    def set_day_open(self, price: float):
+        """開盤價直接用元大OpenPri設定，不用等第一根K棒收盤才推算"""
         if self.day_open is None:
-            self.day_open = bar.open
+            self.day_open = price
             self._sync_state(day_open=self.day_open)
+            self.logger.info(f"[{self.name}] 開盤價設定為 {price}（來自OpenPri）")
+
+    def on_bar_close(self, bar: Bar1Min):
         self.vol_tracker.on_bar_close(bar.volume)
 
     def _stop_price(self) -> float:
@@ -172,25 +176,33 @@ class S2State(StrategyBase):
         self.prev_close = prev_close
         self.box = BoxTracker(dtime(8, 45), self.entry_time)
         self.disabled_today = False
+        self._gap_checked = False   # 獨立旗標，不能再用day_open是不是None來判斷
+                                     # 「是不是第一次」，因為day_open現在是被tick
+                                     # 的set_day_open()提早設定的，跟on_bar_close
+                                     # 的時序脫鉤了
         s = self.state["strategies"][self.name]
         self.disabled_today = s.get("disabled_today", False)
 
-    def on_bar_close(self, bar: Bar1Min):
-        first_bar = self.day_open is None
-        super().on_bar_close(bar)
-        if first_bar and not self.disabled_today:
-            if self.prev_close is None:
-                self.logger.warning(f"[{self.name}] 沒有前日收盤價，無法判斷跳空，今天停用")
+    def set_day_open(self, price: float):
+        super().set_day_open(price)
+        if self._gap_checked or self.disabled_today:
+            return
+        self._gap_checked = True
+        if self.prev_close is None:
+            self.logger.warning(f"[{self.name}] 沒有前日收盤價，無法判斷跳空，今天停用")
+            self.disabled_today = True
+            self._sync_state(disabled_today=True)
+        else:
+            gap = abs(self.day_open - self.prev_close) / self.prev_close
+            if gap < self.gap_pct:
+                self.logger.info(f"[{self.name}] 跳空{gap*100:.2f}%未達{self.gap_pct*100:.1f}%門檻，今天停用")
                 self.disabled_today = True
                 self._sync_state(disabled_today=True)
             else:
-                gap = abs(self.day_open - self.prev_close) / self.prev_close
-                if gap < self.gap_pct:
-                    self.logger.info(f"[{self.name}] 跳空{gap*100:.2f}%未達{self.gap_pct*100:.1f}%門檻，今天停用")
-                    self.disabled_today = True
-                    self._sync_state(disabled_today=True)
-                else:
-                    self.logger.info(f"[{self.name}] 跳空{gap*100:.2f}%達標，正常觀察")
+                self.logger.info(f"[{self.name}] 跳空{gap*100:.2f}%達標，正常觀察")
+
+    def on_bar_close(self, bar: Bar1Min):
+        super().on_bar_close(bar)
         self.box.on_bar_close(bar)
 
     def _entry_window_ok(self, t: dtime) -> bool:
@@ -237,6 +249,9 @@ class S3State:
         if self.long_used or self.short_used or self.position is not None:
             self.logger.info(f"[{self.name}] 從狀態檔恢復：long_used={self.long_used} "
                               f"short_used={self.short_used} position={self.position}")
+
+    def set_day_open(self, price: float):
+        pass  # S3不需要開盤價（停損用箱體中線），接住這個呼叫但不做任何事
 
     def on_bar_close(self, bar: Bar1Min):
         self.vol_tracker.on_bar_close(bar.volume)
